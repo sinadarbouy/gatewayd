@@ -1,0 +1,89 @@
+name: Docker
+
+on:
+  push:
+    tags: ["*"]
+    branches:
+      - "feature/integrate_docker_scout_with_gitHub_actions"
+  pull_request:
+    branches: ["**"]
+
+env:
+  # Hostname of your registry
+  REGISTRY: ghcr.io
+  # Image repository, without hostname and tag
+  IMAGE_NAME: ${{ github.repository }}
+  SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: Install nfpm for building Linux packages
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+      - name: Build and release binaries
+        run: make build-release
+      - name: Build and release Linux packages
+        run: make build-linux-packages
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Authenticate to the container registry
+      - name: Authenticate to registry ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # Extract metadata (tags, labels) for Docker
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            gatewaydio/gatewayd
+            ghcr.io/gatewayd-io/gatewayd
+      # Build and push Docker image with Buildx
+      # (don't push on PR, load instead)
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          # load: ${{ github.event_name == 'pull_request' }}
+          load: ${{ github.ref.name == 'feature/integrate_docker_scout_with_gitHub_actions' }}
+          tags: "ghcr.io/sinadarbouy/gatewayd:test"
+          sbom: true
+          provenance: mode=max
+          # labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Compare the image built in the pull request with the one in production
+      - name: Docker Scout
+        id: docker-scout
+        # if: ${{ github.event_name == 'pull_request' }}
+        uses: docker/scout-action@v1
+        with:
+          command: compare
+          image: ${{ steps.meta.outputs.tags }}
+          to-env: production
+          ignore-unchanged: true
+          only-severities: critical,high
+          github-token: ${{ secrets.GITHUB_TOKEN }}
